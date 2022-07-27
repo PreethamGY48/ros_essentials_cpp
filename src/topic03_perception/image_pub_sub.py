@@ -3,6 +3,8 @@
 import logging
 import math
 from random import randint, random
+# from statistics import covariance
+from tkinter import LEFT
 from tracemalloc import stop
 import rospy
 import cv2
@@ -29,11 +31,14 @@ leftLaneAvg = np.array(())
 rightLaneAvg = np.array(())
 reject = 0
 pre_left_x2 = 0
+previousLeftLaneCov = 0
+previous_leftLane = 400
+previous_rightLane = 400
 # random.seed(12345)
 
 
 def image_callback(ros_image):
-    print('got an image')
+    # print('got an image')
     global bridge
 
     # INITIALIZE FOR THE LEFT AND RIGHT LANE
@@ -52,6 +57,7 @@ def image_callback(ros_image):
     global pre_left_x2
     global leftLaneAvg
     global rightLaneAvg
+    global previousLeftLaneCov
     # convert ros_image into an opencv-compatible image
     # try:
     cv_image = bridge.imgmsg_to_cv2(ros_image, "bgr8")
@@ -313,12 +319,12 @@ def image_callback(ros_image):
     _, _, left_x2, _ = lane_lines[0][0]
     _, _, right_x2, _ = lane_lines[1][0]
 #   print("lane_lines", lane_lines)
-    print("LEFT _x2 ", left_x2)
-    print("right_x2 ", right_x2)
+    # print("LEFT _x2 ", left_x2)
+    # print("right_x2 ", right_x2)
     mid = int(width / 2)
 #   print("mid", mid)
     x_offset = (left_x2 + right_x2) / 2 - mid
-    print("x_offset ", x_offset)
+    # print("x_offset ", x_offset)
     y_offset = int(height / 2)
 #   print("y_offset ",y_offset)
     # x1, _, x2, _ = lane_lines[0][0]
@@ -376,8 +382,8 @@ def image_callback(ros_image):
     #   # Filter the steering
     #   leftLaneSmooth = np.append(leftLaneSmooth,left_x2)
     #   rightLanesmooth = np.append(leftLaneSmooth,right_x2)
-    new_offset = filter(left_x2, right_x2,
-                        previous_leftLane, previous_rightLane)
+    # new_offset = filter(left_x2, right_x2,
+    #                     previous_leftLane, previous_rightLane)
     #   new_offset = filter(leftLaneSmooth ,rightLanesmooth,previous_leftLane,previous_rightLane)
     #   print( "NEW STEERING ANGLE IS ",new_offset)
     #   new_offset = x_offset
@@ -395,20 +401,18 @@ def image_callback(ros_image):
     # CENTER LANE SMOOTH
     leftLaneAvg = np.append(leftLaneAvg, left_x2)
     rightLaneAvg = np.append(rightLaneAvg, right_x2)
-    centerLaneSmooth = np.append(centerLaneSmooth, new_offset)
+    # centerLaneSmooth = np.append(centerLaneSmooth, new_offset)
 
     # MOVE THE ROBOT
     parameter = 50
     if smooth == parameter:
-        centerLane = np.sum(centerLaneSmooth) / parameter
-        leftLaneAvg = np.sum(leftLaneAvg) / parameter
-        rightLaneAvg = np.sum(rightLaneAvg) / parameter
+        # centerLane = np.sum(centerLaneSmooth) / parameter
+        leftLaneAvg = int(np.sum(leftLaneAvg) / parameter)
+        rightLaneAvg = int(np.sum(rightLaneAvg) / parameter)
         print("Left Lane IN THE LOOP IS GIVEN BY THE VALUE = ", leftLaneAvg)
         print("Right Lane IN THE LOOP IS GIVEN BY THE VALUE = ", rightLaneAvg)
-        offset = filter(int(leftLaneAvg), int(rightLaneAvg),
-                        previous_leftLane, previous_rightLane)
-        stabilize_angle = stabilize_steering_angle(
-            offset , previous_offset, len(lane_lines), 20, 10)
+        # offset = filter(int(leftLaneAvg), int(rightLaneAvg),
+        #                 previous_leftLane, previous_rightLane)
 
         cv2.circle(cv_image_path, (int(leftLaneAvg),400), radius=0, color=(0, 255, 0), thickness=15) ##MEAN THE CENTER LANE WE NEED TO FOLLOW
         cv2.circle(cv_image_path, (int(rightLaneAvg),400), radius=0, color=(0, 255, 0), thickness=15)  
@@ -417,12 +421,28 @@ def image_callback(ros_image):
         # previous_leftLane = left_x2
         # previous_rightLane = right_x2
 
+        # KALMAN FILTER
+        transitionErrorLeft = 0.1
+        measurementErrorLeft = 0.1
+        leftLaneAvg,previousLeftLaneCov = kalmanFilterLeftLane(leftLaneAvg ,previous_leftLane,previousLeftLaneCov,transitionErrorLeft,measurementErrorLeft)
+        rightLaneAvg,previousLeftLaneCov = kalmanFilterRightLane(rightLaneAvg ,previous_rightLane,previousLeftLaneCov,transitionErrorLeft,measurementErrorLeft)
+        cv2.circle(cv_image_path, (int(leftLaneAvg),400), radius=0, color=(255, 255, 0), thickness=10) ##MEAN THE CENTER LANE WE NEED TO FOLLOW
+        cv2.circle(cv_image_path, (int(rightLaneAvg),400), radius=0, color=(255, 255, 0), thickness=10)  
+        cv2.imshow('KALMAN LANE ', cv_image_path) 
+        offset = filter(int(leftLaneAvg), int(rightLaneAvg),
+                        previous_leftLane, previous_rightLane)
+        print( "THE KF OFFSET IS ",offset)  
+        print("THE LEFT KF IS  ", leftLaneAvg) 
+        print("THE RIGHT KF IS ",rightLaneAvg)             
+
         previous_offset = offset
         previous_leftLane = leftLaneAvg
         previous_rightLane = rightLaneAvg 
         # heading_image = display_heading_line(cv_image_path, stabilize_angle, line_color=(0, 0, 255), line_width=5)
         # cv2.imshow("heading_image", heading_image)
         # print("steering angle in loop is  = ", stabilize_angle)
+        stabilize_angle = stabilize_steering_angle(
+            offset , previous_offset, len(lane_lines), 20, 10)
         move(stabilize_angle)
         # move(offset)
         smooth = 0
@@ -531,6 +551,26 @@ def filter(leftLane, rightLane, previousLeftLane, previousRightLane):
     new_offset = (leftLane + rightLane) / 2 - 400
     print("New offset is given by = ", new_offset)
     return new_offset
+
+def kalmanFilterLeftLane(LeftLane,previousLeftLane,previousLeftLaneCov,transitionError,measurementError):
+    predictedLeftLane = previousLeftLane
+    predictedLeftLaneCov = previousLeftLaneCov + transitionError
+    # update
+    differ = LeftLane - predictedLeftLane
+    kalmanGain = predictedLeftLaneCov * 1 / (1 * predictedLeftLaneCov * 1 + measurementError)
+    smoothLeftLane = predictedLeftLane + kalmanGain * differ
+    cov = (1 - kalmanGain * 1) * predictedLeftLaneCov
+    return smoothLeftLane, cov
+
+def kalmanFilterRightLane(rightLane,previousRightLane,previousRightLaneCov,transitionError,measurementError):
+    predictedRightLane = previousRightLane
+    predictedRightLaneCov = previousRightLaneCov + transitionError
+    # update
+    differ = rightLane - predictedRightLane
+    kalmanGain = predictedRightLaneCov  * 1 / (1 * predictedRightLaneCov  * 1 + measurementError)
+    smoothLeftLane = predictedRightLane + kalmanGain * differ
+    cov = (1 - kalmanGain * 1) * predictedRightLaneCov 
+    return smoothLeftLane, cov
 
 
 def stabilize_steering_angle(
